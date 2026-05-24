@@ -70,14 +70,6 @@ FD_SEASON_CODES = {
 }
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-football-scout/0.3; +research)"}
 
-# understat.com: comp_id → understat league slug
-# year convention: understat year Y = season starting Aug Y (ending Jun Y+1)
-# → season_end_year = understat_year + 1
-UNDERSTAT_LEAGUES = {
-    "GB1": "EPL", "ES1": "La_liga", "L1": "Bundesliga",
-    "IT1": "Serie_A", "FR1": "Ligue_1",
-}
-
 
 # ---------------------------------------------------------------------------
 # 1. Transfermarkt download
@@ -269,9 +261,6 @@ STAT_COLS = [
     # Position × market-value heuristics (consistently heuristic in both train/inference)
     "prog_passes_p90", "pass_completion_pct", "take_ons_p90",
     "prog_carries_p90", "aerials_won_p90",
-    # REMOVED: tackles_p90, interceptions_p90
-    # → real at inference (FBref) but heuristic at training (TM) — train/inference mismatch
-    # NOTE: shots_p90 (understat) removed — 30% coverage creates inconsistent features
 ]
 
 
@@ -429,155 +418,6 @@ def _pos_group(sub_pos: str | None) -> str:
     if "winger" in s or "striker" in s or "forward" in s:
         return "ATT"
     return "Unknown"
-
-
-# ---------------------------------------------------------------------------
-# 3b. Understat.com — real xG / xA / shots per player-season
-# ---------------------------------------------------------------------------
-
-def fetch_understat() -> pd.DataFrame:
-    """
-    Download per-player npxG/xA/shots from understat.com via POST API.
-    All Big-5 leagues, seasons ending 2016–2025. Cached per league×year.
-    """
-    import time
-
-    all_cache = CACHE_DIR / "understat_all.parquet"
-    if all_cache.exists():
-        return pd.read_parquet(all_cache)
-
-    print("  [understat] Fetching xG/xA data (cached per season)…")
-    api_headers = {**HTTP_HEADERS, "X-Requested-With": "XMLHttpRequest"}
-    records = []
-
-    for comp_id, us_slug in UNDERSTAT_LEAGUES.items():
-        for us_year in range(2015, 2025):
-            season_cache = CACHE_DIR / f"understat_{us_slug}_{us_year}.parquet"
-            if season_cache.exists():
-                df_s = pd.read_parquet(season_cache)
-                if not df_s.empty:
-                    records.append(df_s)
-                continue
-            try:
-                r = requests.post(
-                    "https://understat.com/main/getPlayersStats/",
-                    data={"league": us_slug, "season": str(us_year)},
-                    headers=api_headers,
-                    timeout=30,
-                )
-                r.raise_for_status()
-                data = r.json()
-                if not data.get("success"):
-                    continue
-
-                # Aggregate totals by player (mid-season transfers → multiple rows)
-                agg: dict[str, dict] = {}
-                for p in data["players"]:
-                    name = p.get("player_name", "")
-                    mins = float(p.get("time", 0) or 0)
-                    if mins < 45:
-                        continue
-                    if name not in agg:
-                        agg[name] = {"minutes": 0.0, "npxg": 0.0, "xa": 0.0,
-                                     "shots": 0.0, "kp": 0.0}
-                    agg[name]["minutes"] += mins
-                    agg[name]["npxg"] += float(p.get("npxG", 0) or 0)
-                    agg[name]["xa"] += float(p.get("xA", 0) or 0)
-                    agg[name]["shots"] += float(p.get("shots", 0) or 0)
-                    agg[name]["kp"] += float(p.get("key_passes", 0) or 0)
-
-                rows = []
-                for name, t in agg.items():
-                    if t["minutes"] < 90:
-                        continue
-                    m90 = t["minutes"] / 90
-                    rows.append({
-                        "player_name": name,
-                        "season_end_year": us_year + 1,
-                        "comp_id": comp_id,
-                        "us_npxg_p90": round(t["npxg"] / m90, 4),
-                        "us_xa_p90":   round(t["xa"]   / m90, 4),
-                        "us_shots_p90": round(t["shots"] / m90, 4),
-                        "us_kp_p90":   round(t["kp"]   / m90, 4),
-                    })
-
-                df_s = pd.DataFrame(rows)
-                df_s.to_parquet(season_cache)
-                if not df_s.empty:
-                    records.append(df_s)
-                print(f"    {us_slug} {us_year}: {len(rows):,} players")
-                time.sleep(0.35)
-            except Exception as e:
-                print(f"    warning: understat {us_slug} {us_year} — {e}")
-
-    if not records:
-        return pd.DataFrame()
-    out = pd.concat(records, ignore_index=True)
-    out.to_parquet(all_cache)
-    return out
-
-
-def _match_understat(
-    understat_df: pd.DataFrame,
-    player_seasons_df: pd.DataFrame,
-    tm_players: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Fuzzy-match understat player names to TM player_ids within each
-    (season_end_year, comp_id) cell. Returns (player_id, season_end_year,
-    us_npxg_p90, us_xa_p90, us_shots_p90, us_kp_p90).
-    """
-    from rapidfuzz import fuzz, process as rf_process
-
-    if understat_df.empty:
-        return pd.DataFrame()
-
-    tm_name_map = (
-        tm_players[["player_id", "name"]]
-        .drop_duplicates("player_id")
-        .assign(name_norm=lambda d: d["name"].apply(_norm))
-        .set_index("player_id")["name_norm"]
-        .to_dict()
-    )
-    understat_df = understat_df.copy()
-    understat_df["name_norm"] = understat_df["player_name"].apply(_norm)
-
-    results = []
-    for (season_end_year, comp_id), us_grp in understat_df.groupby(
-        ["season_end_year", "comp_id"]
-    ):
-        league_name = BIG5_COMP.get(comp_id)
-        if not league_name:
-            continue
-
-        # TM player IDs present in this season × league
-        ps_mask = (
-            (player_seasons_df["season_end_year"] == season_end_year)
-            & (player_seasons_df["league"] == league_name)
-        )
-        tm_ids = player_seasons_df.loc[ps_mask, "player_id"].unique()
-        if len(tm_ids) == 0:
-            continue
-
-        us_dedup = us_grp.drop_duplicates(subset="name_norm", keep="first")
-        us_lookup = us_dedup.set_index("name_norm")[
-            ["us_npxg_p90", "us_xa_p90", "us_shots_p90", "us_kp_p90"]
-        ].to_dict(orient="index")
-        us_names = list(us_lookup.keys())
-
-        for pid in tm_ids:
-            tm_name = tm_name_map.get(pid, "")
-            if not tm_name or not us_names:
-                continue
-            best = rf_process.extractOne(tm_name, us_names, scorer=fuzz.WRatio)
-            if best and best[1] >= 74:
-                stats = us_lookup[best[0]]
-                results.append({"player_id": pid,
-                                 "season_end_year": season_end_year, **stats})
-
-    if not results:
-        return pd.DataFrame()
-    return pd.DataFrame(results).drop_duplicates(["player_id", "season_end_year"])
 
 
 # ---------------------------------------------------------------------------
