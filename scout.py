@@ -87,6 +87,9 @@ def apply_filters(df: pd.DataFrame, f: Filters) -> pd.DataFrame:
 
 def _load_model() -> tuple[TwoTowerFitModel, FeatureConfig]:
     cfg = pickle.loads((MODEL_DIR / "feature_config.pkl").read_bytes())
+    assert cfg.player_scaler is not None, "feature_config.pkl is missing player_scaler"
+    assert cfg.club_scaler is not None, "feature_config.pkl is missing club_scaler"
+    assert cfg.ctx_scaler is not None, "feature_config.pkl is missing ctx_scaler"
     # Reconstruct model — dims inferred from saved scalers
     n_player = cfg.player_scaler.n_features_in_
     n_club = cfg.club_scaler.n_features_in_
@@ -145,11 +148,8 @@ def compute_fit_score(
             torch.from_numpy(p_X), torch.from_numpy(c_X), torch.from_numpy(ctx_X)
         ).numpy()
 
-    # 0-100 scaling within the candidate set so the UI displays a clean spread
-    if len(raw) > 1 and raw.std() > 0:
-        normalised = (raw - raw.min()) / (raw.max() - raw.min()) * 100
-    else:
-        normalised = np.full_like(raw, 50.0)
+    # Map sigmoid output (0–1) to 0–100 using the model's own probability scale
+    normalised = (raw * 100).clip(0, 100)
 
     out = candidates.copy()
     out["fit_raw"] = raw.round(4)

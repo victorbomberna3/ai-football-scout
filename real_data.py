@@ -69,6 +69,7 @@ FD_SEASON_CODES = {
     "2021-2022": "2122", "2022-2023": "2223", "2023-2024": "2324",
 }
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-football-scout/0.3; +research)"}
+TM_INJURIES_CACHE = CACHE_DIR / "tm_injuries.parquet"
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +262,110 @@ STAT_COLS = [
     # Position × market-value heuristics (consistently heuristic in both train/inference)
     "prog_passes_p90", "pass_completion_pct", "take_ons_p90",
     "prog_carries_p90", "aerials_won_p90",
+    # Risk / availability features
+    "contract_months_remaining",  # negotiating leverage + player motivation
+    "injury_days_last_2y",        # availability risk
+    "has_serious_injury",         # flag: any single injury >60 days in last 3 years
 ]
+
+
+# ---------------------------------------------------------------------------
+# 3b. Injury history — TM scraping with persistent cache
+# ---------------------------------------------------------------------------
+
+def fetch_player_injuries_bulk(player_ids: list) -> pd.DataFrame:
+    """
+    Scrape TM injury pages for a list of player_ids.
+    Returns one row per injury: (player_id, injury_date, days_missed).
+    Results are cached permanently in TM_INJURIES_CACHE.
+    """
+    import time, re
+
+    already: set[int] = set()
+    existing_rows: list[pd.DataFrame] = []
+
+    if TM_INJURIES_CACHE.exists():
+        cached = pd.read_parquet(TM_INJURIES_CACHE)
+        already = set(cached["player_id"].unique())
+        existing_rows.append(cached)
+
+    to_fetch = [int(pid) for pid in player_ids if int(pid) not in already]
+    if not to_fetch:
+        return existing_rows[0] if existing_rows else pd.DataFrame(
+            columns=["player_id", "injury_date", "days_missed"]
+        )
+
+    print(f"  [injuries] Fetching {len(to_fetch):,} new players "
+          f"({len(already):,} already cached)…")
+
+    new_rows: list[dict] = []
+    for i, pid in enumerate(to_fetch):
+        try:
+            url = f"https://www.transfermarkt.com/player/verletzungen/spieler/{pid}"
+            r = requests.get(url, headers=HTTP_HEADERS, timeout=20)
+            if r.status_code == 200:
+                matches = re.findall(
+                    r'(\d{2}/\d{2}/\d{4})</td>.*?(\d+)\s*days', r.text, re.DOTALL
+                )
+                for date_str, days_str in matches:
+                    try:
+                        new_rows.append({
+                            "player_id":    pid,
+                            "injury_date":  pd.to_datetime(date_str, format="%m/%d/%Y"),
+                            "days_missed":  int(days_str),
+                        })
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+        time.sleep(0.35)
+        if (i + 1) % 100 == 0:
+            print(f"    {i + 1}/{len(to_fetch)} fetched…")
+
+    all_frames = existing_rows
+    if new_rows:
+        all_frames.append(pd.DataFrame(new_rows))
+
+    out = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame(
+        columns=["player_id", "injury_date", "days_missed"]
+    )
+    # Mark every fetched player as done (even those with no injuries) so we don't re-fetch
+    fetched_df = pd.DataFrame({"player_id": to_fetch, "injury_date": pd.NaT, "days_missed": 0})
+    out = pd.concat([out, fetched_df], ignore_index=True).drop_duplicates(
+        subset=["player_id", "injury_date", "days_missed"]
+    )
+    out.to_parquet(TM_INJURIES_CACHE, index=False)
+    return out
+
+
+def compute_injury_features(
+    injuries_df: pd.DataFrame,
+    player_ids,
+    reference_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """
+    Compute per-player injury risk features relative to reference_date.
+    For the scouting pool reference_date=today; for training use the transfer date.
+    """
+    if reference_date is None:
+        reference_date = pd.Timestamp.now()
+
+    cutoff_2y = reference_date - pd.Timedelta(days=730)
+    cutoff_3y = reference_date - pd.Timedelta(days=1095)
+
+    rows = []
+    for pid in player_ids:
+        pid = int(pid)
+        p = injuries_df[injuries_df["player_id"] == pid].dropna(subset=["injury_date"])
+        recent  = p[(p["injury_date"] >= cutoff_2y) & (p["injury_date"] <= reference_date)]
+        p3y     = p[(p["injury_date"] >= cutoff_3y) & (p["injury_date"] <= reference_date)]
+        rows.append({
+            "player_id":          pid,
+            "injury_days_last_2y": float(recent["days_missed"].sum()),
+            "has_serious_injury":  float((p3y["days_missed"] > 60).any()),
+        })
+    return pd.DataFrame(rows)
 
 
 def build_players_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -392,6 +496,26 @@ def build_players_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
             out[col] = (defaults + mv_scale * 2).clip(55, 95).round(1)
         else:
             out[col] = (defaults * mv_scale).round(3)
+
+    # --- Contract months remaining ---
+    today = pd.Timestamp.now()
+    contract_dates = tm_players.set_index("player_id")["contract_expiration_date"]
+    out["_contract_date"] = pd.to_datetime(
+        out["player_id"].map(contract_dates), errors="coerce"
+    )
+    out["contract_months_remaining"] = (
+        (out["_contract_date"] - today).dt.days / 30.44
+    ).clip(lower=0)
+    med_contract = out["contract_months_remaining"].median()
+    out["contract_months_remaining"] = out["contract_months_remaining"].fillna(med_contract).round(1)
+    out = out.drop(columns=["_contract_date"], errors="ignore")
+
+    # --- Injury features ---
+    inj_df = fetch_player_injuries_bulk(out["player_id"].tolist())
+    inj_feats = compute_injury_features(inj_df, out["player_id"].tolist())
+    out = out.merge(inj_feats, on="player_id", how="left")
+    out["injury_days_last_2y"] = out["injury_days_last_2y"].fillna(0.0)
+    out["has_serious_injury"]  = out["has_serious_injury"].fillna(0.0)
 
     keep = ["player_id", "player_name", "position_group", "age",
             "minutes", "league", "market_value_eur_m", "current_club_id"] + STAT_COLS
@@ -585,7 +709,8 @@ def build_player_seasons_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
         else:
             season_stats[col] = (defaults * mv_scale).round(3)
 
-    season_stats[STAT_COLS] = season_stats[STAT_COLS].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    present_stat_cols = [c for c in STAT_COLS if c in season_stats.columns]
+    season_stats[present_stat_cols] = season_stats[present_stat_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     season_stats = season_stats.drop(
         columns=["season_start_date", "prev_year_date", "dob_year",
                  "market_value_in_eur", "mv_prev_eur", "goals", "assists", "yellow_cards"],
@@ -774,7 +899,8 @@ def build_transfers_df(
         transfers.loc[nan_mask, "age"] = transfers.loc[nan_mask, "transfer_age"]
         transfers.loc[nan_mask, "market_value_eur_m"] = 5.0
         transfers.loc[nan_mask, "league"] = "Premier League"
-        for col in STAT_COLS:
+        # Only fill columns that already exist in transfers (risk cols added later)
+        for col in [c for c in STAT_COLS if c in transfers.columns]:
             if col in POS_MEDIANS:
                 pg_series = transfers.loc[nan_mask, "position_group"]
                 fills = pg_series.map(POS_MEDIANS[col]).fillna(0.1)
@@ -784,9 +910,46 @@ def build_transfers_df(
 
     transfers = transfers.drop(columns=["_orig_idx", "pre_season_year"], errors="ignore")
 
+    # --- Contract months remaining at time of transfer ---
+    tm_players_df = tm["players"].copy()
+    contract_map  = pd.to_datetime(
+        tm_players_df.set_index("player_id")["contract_expiration_date"], errors="coerce"
+    )
+    transfers["_contract_date"] = pd.to_datetime(
+        transfers["player_id"].map(contract_map), errors="coerce"
+    )
+    transfers["contract_months_remaining"] = (
+        (transfers["_contract_date"] - transfers["transfer_date"]).dt.days / 30.44
+    ).clip(lower=0).fillna(12.0)   # 12-month fallback for missing contracts
+    transfers = transfers.drop(columns=["_contract_date"], errors="ignore")
+
+    # --- Injury features at time of transfer (vectorized) ---
+    inj_df = fetch_player_injuries_bulk(transfers["player_id"].unique().tolist())
+    if not inj_df.empty and "injury_date" in inj_df.columns:
+        inj_clean = inj_df.dropna(subset=["injury_date"]).copy()
+        inj_clean["injury_date"] = pd.to_datetime(inj_clean["injury_date"])
+        # Cross-join transfers × injuries on player_id, then filter by date window
+        t_tmp = transfers[["player_id", "transfer_date"]].copy().reset_index().rename(columns={"index": "_tid"})
+        merged = t_tmp.merge(inj_clean, on="player_id", how="left")
+        merged["days_before"] = (
+            pd.to_datetime(merged["transfer_date"]) - merged["injury_date"]
+        ).dt.days
+        mask_2y = (merged["days_before"] >= 0) & (merged["days_before"] <= 730)
+        mask_3y = (merged["days_before"] >= 0) & (merged["days_before"] <= 1095)
+        days_agg = merged[mask_2y].groupby("_tid")["days_missed"].sum().rename("injury_days_last_2y")
+        serious_agg = (
+            merged[mask_3y].groupby("_tid")["days_missed"].max() > 60
+        ).astype(float).rename("has_serious_injury")
+        transfers["injury_days_last_2y"] = days_agg.reindex(transfers.index).fillna(0.0).values
+        transfers["has_serious_injury"]  = serious_agg.reindex(transfers.index).fillna(0.0).values
+    else:
+        transfers["injury_days_last_2y"] = 0.0
+        transfers["has_serious_injury"]  = 0.0
+
     out_cols = [
         "player_id", "to_club_id", "transfer_age", "transfer_fee",
         "transfer_date", "minutes_share_y1", "value_delta_18m", "survival_2y", "success_score",
+        "contract_months_remaining", "injury_days_last_2y", "has_serious_injury",
     ] + embed_cols
     out = transfers[[c for c in out_cols if c in transfers.columns]].copy()
     out = out.rename(columns={"to_club_id": "destination_club_id", "transfer_fee": "fee_eur_m"})
@@ -836,7 +999,8 @@ def generate(
     if not force_rebuild and all(p.exists() for p in cached):
         import pyarrow.parquet as pq
         cached_cols = pq.read_schema(cached[2]).names
-        if "goals_p90" in cached_cols:
+        required_cols = {"goals_p90", "contract_months_remaining", "injury_days_last_2y", "has_serious_injury"}
+        if required_cols.issubset(set(cached_cols)):
             print("  [cache] Loading real data from parquet files...")
             players_df = pd.read_parquet(cached[0])
             clubs_df = pd.read_parquet(cached[1])
@@ -845,7 +1009,7 @@ def generate(
                   f"transfers={len(transfers_df):,}")
             return {"players": players_df, "clubs": clubs_df, "transfers": transfers_df}
         else:
-            print("  [cache] Old format (no temporal stats) — rebuilding...")
+            print("  [cache] Stale format (missing new columns) — rebuilding...")
 
     print("=" * 60)
     print("REAL DATA ETL — AI Football Scout v3")

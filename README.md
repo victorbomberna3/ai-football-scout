@@ -52,7 +52,10 @@ Player stats (24 features)          Club tactics (9 features)
   24 → 64 → 32-d embedding             9 → 32 → 32-d embedding
         │                                     │
         └──────────────── Head MLP ───────────┘
-              input: concat(p⊙c, |p−c|, context)
+              input: concat(p_emb ⊙ c_emb,  |p_emb − c_emb|,  context)
+                                32-d               32-d            2-d
+              ────────────────────────────────────────────────────────────
+                                       66-d total
               layers: 66 → 64 → 64 → 1 → sigmoid
                                 │
                       Transfer success score (0–1)
@@ -64,12 +67,12 @@ The 32-dimensional player embedding is reused in the **Similar Players** tab —
 
 | Model | R² | MAE | Spearman ρ |
 |---|---|---|---|
-| Cosine baseline | ~0.01 | — | ~0.13 |
-| Linear (Ridge) | 0.05 | — | 0.21 |
-| LightGBM | 0.25 | 0.16 | 0.50 |
-| **Two-tower (this model)** | **0.27** | **0.16** | **0.53** |
+| Cosine baseline | ~0.00 | 0.19 | ~-0.01 |
+| Linear (Ridge) | 0.25 | 0.16 | 0.51 |
+| LightGBM | **0.28** | **0.15** | **0.53** |
+| Two-tower (this model) | 0.26 | 0.16 | 0.52 |
 
-R² ≈ 0.27 means the model explains 27% of variance in real transfer outcomes — strong for this domain given the inherent noise in transfers (injuries, dressing-room dynamics, managerial changes).
+R² ≈ 0.26–0.28 means the models explain roughly a quarter of variance in real transfer outcomes — strong for this domain given the inherent noise in transfers (injuries, dressing-room dynamics, managerial changes). LightGBM and the two-tower are within 3 pp of each other; the two-tower's main practical advantage is the learned player embedding space used in the Similar Players tab.
 
 ---
 

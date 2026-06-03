@@ -39,7 +39,10 @@ PLAYER_STAT_COLS = [
     # Position × market-value heuristics (consistently heuristic in both train/inference)
     "prog_passes_p90", "pass_completion_pct",
     "take_ons_p90", "prog_carries_p90", "aerials_won_p90",
-    # REMOVED: tackles_p90, interceptions_p90 (train/inference mismatch)
+    # Risk / availability
+    "contract_months_remaining",
+    "injury_days_last_2y",
+    "has_serious_injury",
 ]
 CLUB_STAT_COLS = ["ppda", "possession_pct", "directness_idx", "line_height_m"]
 POSITIONS = ["GK", "DEF", "MID", "ATT"]
@@ -181,9 +184,9 @@ class _MLP(nn.Module):
 
 class TwoTowerFitModel(nn.Module):
     """
-    Player tower → 16-d player embedding
-    Club tower   → 16-d club embedding
-    Head: concat([player_emb, club_emb, transfer_ctx]) → MLP → sigmoid fit score
+    Player tower → 32-d player embedding
+    Club tower   → 32-d club embedding
+    Head: concat(p_emb ⊙ c_emb, |p_emb − c_emb|, transfer_ctx) → MLP → sigmoid fit score
     """
     def __init__(self, n_player_feats: int, n_club_feats: int, n_ctx_feats: int,
                  emb_dim: int = 32, head_hidden: int = 64, dropout: float = 0.15):
