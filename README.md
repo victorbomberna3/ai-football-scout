@@ -46,17 +46,17 @@ The sidebar lets you configure:
 The core idea: **separate encoders for player and club**, then learn their interaction.
 
 ```
-Player stats (24 features)          Club tactics (9 features)
+Player stats (15 features)          Club tactics (9 features)
         │                                     │
   Player Tower                          Club Tower
-  24 → 64 → 32-d embedding             9 → 32 → 32-d embedding
+  15 → 64 → 32-d embedding             9 → 32 → 32-d embedding
         │                                     │
         └──────────────── Head MLP ───────────┘
               input: concat(p_emb ⊙ c_emb,  |p_emb − c_emb|,  context)
-                                32-d               32-d            2-d
+                                32-d               32-d            1-d
               ────────────────────────────────────────────────────────────
-                                       66-d total
-              layers: 66 → 64 → 64 → 1 → sigmoid
+                                       65-d total
+              layers: 65 → 64 → 64 → 1 → sigmoid
                                 │
                       Transfer success score (0–1)
 ```
@@ -67,12 +67,12 @@ The 32-dimensional player embedding is reused in the **Similar Players** tab —
 
 | Model | R² | MAE | Spearman ρ |
 |---|---|---|---|
-| Cosine baseline | ~0.00 | 0.19 | ~-0.01 |
-| Linear (Ridge) | 0.25 | 0.16 | 0.51 |
-| LightGBM | **0.28** | **0.15** | **0.53** |
-| Two-tower (this model) | 0.26 | 0.16 | 0.52 |
+| Cosine baseline | 0.00 | 0.173 | 0.008 |
+| LightGBM | 0.088 | 0.167 | 0.325 |
+| Linear (Ridge) | 0.127 | 0.160 | 0.353 |
+| Two-tower (this model) | 0.122 | **0.160** | **0.370** |
 
-R² ≈ 0.26–0.28 means the models explain roughly a quarter of variance in real transfer outcomes — strong for this domain given the inherent noise in transfers (injuries, dressing-room dynamics, managerial changes). LightGBM and the two-tower are within 3 pp of each other; the two-tower's main practical advantage is the learned player embedding space used in the Similar Players tab.
+R² ≈ 0.12 reflects the genuine noise in transfer outcomes — injuries, managerial changes, and dressing-room dynamics are not in the data. The two-tower leads all baselines on Spearman rank correlation, which matters most for producing a useful shortlist. Its main practical advantage over the linear baseline is the learned 32-dimensional player embedding space used in the Similar Players tab.
 
 ---
 
@@ -113,7 +113,7 @@ streamlit run app.py
 
 The pipeline uses **Transfermarkt** as its primary data source (Big-5 leagues, 2024–25 season for the player pool; 2018–2024 for transfer labels). Data is fetched and cached locally under `data/` — this directory is excluded from the repo.
 
-Player features include: goals/90, assists/90, progressive passes, progressive carries, take-ons, pass completion %, aerials won, minutes per game, market value, market value momentum (12-month), position group, age.
+Player features include: goals/90, assists/90, npxG/90, key passes/90, yellow cards/90, avg minutes/game, appearances % of season, market value (log), market value momentum (12-month), injury days (2y), serious injury flag, position group (ATT/MID/DEF/GK).
 
 Club features include: PPDA, possession %, directness index, defensive line height, league.
 
