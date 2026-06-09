@@ -254,9 +254,12 @@ STAT_COLS = [
     "goals_p90", "assists_p90",
     "yellow_cards_p90",       # aggression/pressing proxy
     "avg_min_per_game",       # starter vs sub (coach trust)
-    "n_apps",                 # selection frequency
+    "apps_pct_season",        # starter rate = n_apps/38, capped 0-1
     # Proxied from real data (consistent train/inference)
     "npxg_p90", "key_passes_p90",
+    # Real FBref misc stats (joined by player_name × league × season)
+    "tkl_won_p90",            # tackles won per 90 — pressing intensity
+    "interceptions_p90",      # interceptions per 90 — pressing positioning
     # Career trajectory (from valuations)
     "mv_momentum_12m",
     # Position × market-value heuristics (consistently heuristic in both train/inference)
@@ -420,7 +423,8 @@ def build_players_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
     agg["goals_p90"]        = (agg["goals"]        / agg["_90s"]).round(3)
     agg["assists_p90"]      = (agg["assists"]       / agg["_90s"]).round(3)
     agg["yellow_cards_p90"] = (agg["yellow_cards"]  / agg["_90s"]).clip(0, 2).round(3)
-    agg["avg_min_per_game"] = (agg["minutes"] / agg["n_apps"]).clip(0, 90).round(1)
+    agg["avg_min_per_game"]  = (agg["minutes"] / agg["n_apps"]).clip(0, 90).round(1)
+    agg["apps_pct_season"]   = (agg["n_apps"] / 38).clip(0, 1).round(3)
 
     # Proxies
     agg["npxg_p90"]       = (agg["goals_p90"]   * 0.88).round(3)
@@ -496,6 +500,34 @@ def build_players_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
             out[col] = (defaults + mv_scale * 2).clip(55, 95).round(1)
         else:
             out[col] = (defaults * mv_scale).round(3)
+
+    # --- FBref pressing stats (tkl_won_p90, interceptions_p90) ---
+    # Position-average fallbacks for unmatched players
+    PRESS_POS_DEFAULTS = {
+        # tkl_won_p90, interceptions_p90
+        "GK":      (0.05, 0.2),
+        "DEF":     (1.80, 1.5),
+        "MID":     (1.50, 1.2),
+        "ATT":     (0.60, 0.5),
+        "Unknown": (1.20, 1.0),
+    }
+    try:
+        from fbref_advanced import fetch_fbref_pressing_stats, enrich_with_pressing
+        press_df = fetch_fbref_pressing_stats(["2024-25"], cache_dir=CACHE_DIR, force_refresh=False)
+        out = enrich_with_pressing(out, press_df, season_label="2024-25")
+    except Exception as exc:
+        print(f"  [fbref_press] skipping (not yet cached or failed): {exc}")
+        out["tkl_won_p90"]       = np.nan
+        out["interceptions_p90"] = np.nan
+
+    for press_col, pos_idx in [("tkl_won_p90", 0), ("interceptions_p90", 1)]:
+        mask = out[press_col].isna()
+        if mask.any():
+            fallback = out.loc[mask, "position_group"].map(
+                {pos: v[pos_idx] for pos, v in PRESS_POS_DEFAULTS.items()}
+            ).fillna(PRESS_POS_DEFAULTS["Unknown"][pos_idx])
+            out.loc[mask, press_col] = fallback.values
+        out[press_col] = out[press_col].clip(0).round(3)
 
     # --- Contract months remaining ---
     today = pd.Timestamp.now()
@@ -616,7 +648,8 @@ def build_player_seasons_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
     season_stats["npxg_p90"] = (season_stats["goals_p90"] * 0.88).round(3)
     season_stats["key_passes_p90"] = (season_stats["assists_p90"] * 2.0).round(3)
     season_stats["yellow_cards_p90"] = (season_stats["yellow_cards"] / mins90).round(3).clip(0, 2)
-    season_stats["avg_min_per_game"] = (season_stats["minutes"] / season_stats["n_apps"]).clip(0, 90).round(1)
+    season_stats["avg_min_per_game"]  = (season_stats["minutes"] / season_stats["n_apps"]).clip(0, 90).round(1)
+    season_stats["apps_pct_season"]   = (season_stats["n_apps"] / 38).clip(0, 1).round(3)
 
     # Market value at season start via merge_asof
     valuations = tm["player_valuations"].copy()
@@ -671,14 +704,15 @@ def build_player_seasons_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
     ).clip(-0.9, 3.0).fillna(0.0)
 
     # Player metadata
-    tm_players = tm["players"][["player_id", "sub_position", "date_of_birth"]].copy()
+    tm_players = tm["players"][["player_id", "name", "sub_position", "date_of_birth"]].copy()
     tm_players["position_group"] = tm_players["sub_position"].apply(_pos_group)
     tm_players["dob_year"] = pd.to_datetime(tm_players["date_of_birth"], errors="coerce").dt.year
 
     season_stats = season_stats.merge(
-        tm_players[["player_id", "position_group", "dob_year"]],
+        tm_players[["player_id", "name", "position_group", "dob_year"]],
         on="player_id", how="left",
     )
+    season_stats["player_name"] = season_stats["name"].fillna("")
     season_stats["position_group"] = season_stats["position_group"].fillna("Unknown")
     season_stats["age"] = (season_stats["season_end_year"] - 1 - season_stats["dob_year"]).clip(15, 45).fillna(25)
 
@@ -709,11 +743,47 @@ def build_player_seasons_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
         else:
             season_stats[col] = (defaults * mv_scale).round(3)
 
+    # --- FBref pressing stats: add season_label for join ---
+    PRESS_POS_DEFAULTS_S = {
+        "GK":      (0.05, 0.2),
+        "DEF":     (1.80, 1.5),
+        "MID":     (1.50, 1.2),
+        "ATT":     (0.60, 0.5),
+        "Unknown": (1.20, 1.0),
+    }
+    # Map season_end_year (e.g. 2023) → season_label "2022-23"
+    season_stats["season_label"] = season_stats["season_end_year"].apply(
+        lambda y: f"20{str(y-1)[2:]}-{str(y)[2:]}"
+    )
+    try:
+        from fbref_advanced import fetch_fbref_pressing_stats, enrich_with_pressing, SUPPORTED_SEASONS
+        all_labels = [l for l in season_stats["season_label"].unique() if l in SUPPORTED_SEASONS]
+        press_df = fetch_fbref_pressing_stats(all_labels, cache_dir=CACHE_DIR)
+        season_stats = enrich_with_pressing(
+            season_stats, press_df,
+            season_label=None, season_label_col="season_label",
+            league_col="league", name_col="player_name",
+        )
+    except Exception as exc:
+        print(f"  [fbref_press] skipping for seasons: {exc}")
+        season_stats["tkl_won_p90"]       = np.nan
+        season_stats["interceptions_p90"] = np.nan
+
+    for press_col, pos_idx in [("tkl_won_p90", 0), ("interceptions_p90", 1)]:
+        mask = season_stats[press_col].isna()
+        if mask.any():
+            fallback = season_stats.loc[mask, "position_group"].map(
+                {pos: v[pos_idx] for pos, v in PRESS_POS_DEFAULTS_S.items()}
+            ).fillna(PRESS_POS_DEFAULTS_S["Unknown"][pos_idx])
+            season_stats.loc[mask, press_col] = fallback.values
+        season_stats[press_col] = season_stats[press_col].clip(0).round(3)
+
     present_stat_cols = [c for c in STAT_COLS if c in season_stats.columns]
     season_stats[present_stat_cols] = season_stats[present_stat_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     season_stats = season_stats.drop(
         columns=["season_start_date", "prev_year_date", "dob_year",
-                 "market_value_in_eur", "mv_prev_eur", "goals", "assists", "yellow_cards"],
+                 "market_value_in_eur", "mv_prev_eur", "goals", "assists", "yellow_cards",
+                 "name", "season_label"],
         errors="ignore",
     )
     n_big5 = len(big5_stats)
@@ -769,7 +839,7 @@ def build_transfers_df(
     out_transfers = tm["transfers"].copy()
     out_transfers["transfer_date"] = pd.to_datetime(out_transfers["transfer_date"], errors="coerce")
 
-    minutes_share, value_delta, survival = [], [], []
+    minutes_share, value_delta, survival, goal_contributions = [], [], [], []
 
     for _, row in tqdm(transfers.iterrows(), total=len(transfers), desc="  labels"):
         td = row["transfer_date"]
@@ -778,16 +848,23 @@ def build_transfers_df(
         n1_start = pd.Timestamp(td.year if td.month < 10 else td.year + 1, 8, 1)
         n1_end = n1_start + pd.DateOffset(months=11)
 
-        # minutes_share_y1
+        # minutes_share_y1 + goal_contribution_y1 (same grp lookup, same window)
         try:
             grp = app_grp.get_group((row["player_id"], row["to_club_id"]))
             mask = (grp["date"] >= n1_start) & (grp["date"] <= n1_end)
-            mins = float(grp.loc[mask, "minutes_played"].sum())
+            year1 = grp.loc[mask]
+            mins = float(year1["minutes_played"].sum())
             comp_id = club_comp_map.get(row["to_club_id"], "GB1")
             max_min = MAX_SEASON_MIN.get(comp_id, 3420)
             minutes_share.append(min(mins / max_min, 1.0))
+            # goals + assists per 90 in year 1, clipped to [0, 1]
+            g_y1 = float(year1["goals"].sum()) if "goals" in year1.columns else 0.0
+            a_y1 = float(year1["assists"].sum()) if "assists" in year1.columns else 0.0
+            gc_p90 = (g_y1 + a_y1) / max(mins / 90, 1.0)
+            goal_contributions.append(min(gc_p90, 1.0))
         except KeyError:
             minutes_share.append(np.nan)
+            goal_contributions.append(np.nan)
 
         # value_delta_18m
         def _val_at(pid: int, target: pd.Timestamp) -> float:
@@ -821,16 +898,78 @@ def build_transfers_df(
     transfers["minutes_share_y1"] = minutes_share
     transfers["value_delta_18m"] = value_delta
     transfers["survival_2y"] = survival
+    transfers["goal_contribution_y1"] = goal_contributions
 
-    # Require at least the two continuous outcome labels
-    transfers = transfers.dropna(subset=["minutes_share_y1", "value_delta_18m"]).copy()
+    # Require minutes_share (primary label); drop rows where it is missing.
+    transfers = transfers.dropna(subset=["minutes_share_y1"]).copy()
+    transfers = transfers.reset_index(drop=True)
 
-    surv_filled = transfers["survival_2y"].fillna(0.5)
-    transfers["success_score"] = (
-        0.5 * transfers["minutes_share_y1"]
-        + 0.3 * (1 / (1 + np.exp(-transfers["value_delta_18m"] * 2)))
-        + 0.2 * surv_filled
-    ).round(3)
+    # survival_2y is unknown for transfers after mid-2022 (window not elapsed).
+    surv_proxy = (transfers["minutes_share_y1"] >= 0.30).astype(float)
+    surv_filled = transfers["survival_2y"].fillna(surv_proxy)
+
+    # goal_contribution_y1 may be NaN when minutes_share is very low; fill 0.
+    gc_filled = transfers["goal_contribution_y1"].fillna(0.0)
+
+    # pre_season_year needed here for the fit_surprise computation below.
+    transfers["pre_season_year"] = np.where(
+        transfers["transfer_date"].dt.month >= 7,
+        transfers["transfer_date"].dt.year,
+        transfers["transfer_date"].dt.year - 1,
+    )
+
+    # fit_surprise: did the player play MORE than their pre-transfer history predicted?
+    # A player who normally plays 80% of games but plays only 30% at the new club
+    # almost certainly doesn't fit the system — regardless of raw quality.
+    # This gives the model a tactical-fit signal beyond pure player quality.
+    ps_apps = (
+        player_seasons_df[["player_id", "season_end_year", "apps_pct_season"]]
+        .dropna(subset=["apps_pct_season"])
+        .sort_values(["player_id", "season_end_year"])
+        .copy()
+    )
+    # For each player×season, expected = rolling mean of the prior 2 seasons
+    ps_apps["expected_apps_pct"] = (
+        ps_apps.groupby("player_id")["apps_pct_season"]
+        .transform(lambda x: x.shift(1).rolling(2, min_periods=1).mean())
+    )
+    ps_apps = ps_apps.drop_duplicates(subset=["player_id", "season_end_year"])
+    transfers = transfers.merge(
+        ps_apps[["player_id", "season_end_year", "expected_apps_pct"]].rename(
+            columns={"season_end_year": "pre_season_year"}
+        ),
+        on=["player_id", "pre_season_year"],
+        how="left",
+    ).reset_index(drop=True)
+
+    # fit_surprise: actual minutes - expected minutes.
+    # Raw mean is negative (~-0.22) because most transfers are upward moves —
+    # players naturally play fewer minutes when joining a better club.
+    # We centre on the population median so the signal measures "better or worse
+    # than typical for this cohort", not "better or worse than own previous club".
+    fit_surprise_raw = transfers["minutes_share_y1"] - transfers["expected_apps_pct"]
+    pop_median = float(fit_surprise_raw.median())          # ≈ -0.15 to -0.25
+    fit_surprise_centered = fit_surprise_raw - pop_median  # centred ≈ 0
+    # Clip to [-0.5, 0.5] then shift to [0, 1]; NaN rows (no baseline) → 0.5 (neutral)
+    fit_surprise = (fit_surprise_centered.clip(-0.5, 0.5) + 0.5).fillna(0.5).values
+    # Use .values throughout to prevent index-alignment NaN after the merge
+    surv_arr = surv_filled.values
+    gc_arr   = gc_filled.values
+    min_arr  = transfers["minutes_share_y1"].values
+    transfers = transfers.drop(columns=["expected_apps_pct"])
+    n_surprise = int(fit_surprise_raw.notna().sum())
+    print(f"  fit_surprise: coverage {n_surprise:,}/{len(transfers):,}, "
+          f"raw_mean={fit_surprise_raw.mean():.3f}, pop_median={pop_median:.3f}")
+
+    # Target: did the transfer work out for the club?
+    #   35% — playing time in season 1 (coach gave them the shirt)
+    #   30% — goal contribution per 90 in year 1 (productive output)
+    #   20% — stayed at the club for 2 years (relationship held)
+    #   15% — fit_surprise: played more than pre-transfer history predicted
+    #          (tactical-fit signal independent of raw quality)
+    transfers["success_score"] = np.round(
+        0.35 * min_arr + 0.30 * gc_arr + 0.20 * surv_arr + 0.15 * fit_surprise, 3
+    )
 
     # Accurate transfer_age from birth dates
     tm_dob = tm["players"][["player_id", "date_of_birth"]].drop_duplicates("player_id").copy()
@@ -845,16 +984,10 @@ def build_transfers_df(
 
     # -----------------------------------------------------------------------
     # Temporal join: embed player stats from the season BEFORE the transfer.
-    # pre_season_year: season ending in that year ended before the transfer.
-    #   Transfer Jul-Dec Y → season Y (Aug Y-1 → Jun Y) just completed.
-    #   Transfer Jan-Jun Y → season Y-1 (Aug Y-2 → Jun Y-1) last complete.
+    # pre_season_year already computed above for fit_surprise; reset index for
+    # the merge_asof that follows.
     # -----------------------------------------------------------------------
     transfers = transfers.reset_index(drop=True)
-    transfers["pre_season_year"] = np.where(
-        transfers["transfer_date"].dt.month >= 7,
-        transfers["transfer_date"].dt.year,
-        transfers["transfer_date"].dt.year - 1,
-    )
 
     embed_cols = STAT_COLS + ["age", "market_value_eur_m", "position_group", "league"]
     embed_cols = [c for c in embed_cols if c in player_seasons_df.columns]
@@ -946,9 +1079,42 @@ def build_transfers_df(
         transfers["injury_days_last_2y"] = 0.0
         transfers["has_serious_injury"]  = 0.0
 
+    # --- Loan detection (vectorised) ---
+    # A transfer is flagged as a loan when the player departs the destination
+    # club back to any club within 18 months. This catches standard loans and
+    # season-long loans without requiring an explicit loan-type column.
+    all_tm = tm["transfers"].copy()
+    all_tm["transfer_date"] = pd.to_datetime(all_tm["transfer_date"], errors="coerce")
+    all_tm = all_tm.dropna(subset=["transfer_date"])
+
+    transfers["_idx"] = range(len(transfers))
+    future_moves = all_tm[["player_id", "from_club_id", "transfer_date"]].rename(
+        columns={"transfer_date": "future_date", "from_club_id": "future_from"}
+    )
+    loan_check = transfers[["_idx", "player_id", "to_club_id", "transfer_date"]].merge(
+        future_moves, on="player_id", how="left"
+    )
+    loan_check["days_diff"] = (loan_check["future_date"] - loan_check["transfer_date"]).dt.days
+    loan_mask_flag = (
+        (loan_check["future_from"] == loan_check["to_club_id"]) &
+        (loan_check["days_diff"] > 0) &
+        (loan_check["days_diff"] <= 548)   # 18 months
+    )
+    loan_idxs = set(loan_check.loc[loan_mask_flag, "_idx"].unique())
+    # Require fee == 0: paid transfers where the player moved on quickly are not loans,
+    # just volatile permanent signings — keep them, they carry real club-fit signal.
+    fee_zero = pd.to_numeric(transfers["transfer_fee"], errors="coerce").fillna(0) == 0
+    transfers["is_loan"] = transfers["_idx"].isin(loan_idxs) & fee_zero
+    transfers = transfers.drop(columns=["_idx"])
+
+    n_loans = transfers["is_loan"].sum()
+    print(f"  {n_loans:,} transfers flagged as loans ({n_loans/len(transfers)*100:.0f}%)")
+
     out_cols = [
         "player_id", "to_club_id", "transfer_age", "transfer_fee",
-        "transfer_date", "minutes_share_y1", "value_delta_18m", "survival_2y", "success_score",
+        "transfer_date", "is_loan",
+        "minutes_share_y1", "value_delta_18m", "survival_2y",
+        "goal_contribution_y1", "success_score",
         "contract_months_remaining", "injury_days_last_2y", "has_serious_injury",
     ] + embed_cols
     out = transfers[[c for c in out_cols if c in transfers.columns]].copy()

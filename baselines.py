@@ -20,7 +20,22 @@ from sklearn.linear_model import Ridge
 import lightgbm as lgb
 
 
-def _split(n: int, val_frac: float, test_frac: float, seed: int):
+def _split(n: int, val_frac: float, test_frac: float, seed: int,
+           player_ids: np.ndarray | None = None):
+    if player_ids is not None:
+        unique_pids = np.unique(player_ids)
+        rng = np.random.default_rng(seed)
+        shuffled = unique_pids[rng.permutation(len(unique_pids))]
+        n_test_p = int(len(shuffled) * test_frac)
+        n_val_p  = int(len(shuffled) * val_frac)
+        test_pids = set(shuffled[:n_test_p])
+        val_pids  = set(shuffled[n_test_p:n_test_p + n_val_p])
+        rows = np.arange(n)
+        flags = np.array([
+            0 if pid in test_pids else (1 if pid in val_pids else 2)
+            for pid in player_ids
+        ])
+        return rows[flags == 2], rows[flags == 1], rows[flags == 0]  # train, val, test
     perm = np.random.default_rng(seed).permutation(n)
     n_test = int(n * test_frac)
     n_val = int(n * val_frac)
@@ -117,9 +132,10 @@ class GBMBaseline:
 def evaluate_baselines(
     player_X: np.ndarray, club_X: np.ndarray, ctx_X: np.ndarray, y: np.ndarray,
     val_frac: float = 0.15, test_frac: float = 0.15, seed: int = 0,
+    player_ids: np.ndarray | None = None,
 ) -> dict:
     """Train all baselines on the same train/val/test split and return metrics."""
-    train_idx, val_idx, test_idx = _split(len(y), val_frac, test_frac, seed)
+    train_idx, val_idx, test_idx = _split(len(y), val_frac, test_frac, seed, player_ids)
 
     def _slice(arr, idx): return arr[idx]
 

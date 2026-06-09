@@ -29,20 +29,25 @@ from sklearn.preprocessing import StandardScaler
 PLAYER_STAT_COLS = [
     # Real from TM appearances (consistent train/inference)
     "goals_p90", "assists_p90",
-    "yellow_cards_p90",    # aggression/pressing proxy
-    "avg_min_per_game",    # starter vs sub (coach trust)
-    "n_apps",              # selection frequency
+    "yellow_cards_p90",      # aggression/pressing proxy (TM)
+    "avg_min_per_game",      # starter vs sub (coach trust)
+    "apps_pct_season",       # starter rate (n_apps/38, capped 0-1)
     # Proxied from real data (consistent train/inference)
     "npxg_p90", "key_passes_p90",
     # Career trajectory (from valuations)
     "mv_momentum_12m",
-    # Position × market-value heuristics (consistently heuristic in both train/inference)
-    "prog_passes_p90", "pass_completion_pct",
-    "take_ons_p90", "prog_carries_p90", "aerials_won_p90",
-    # Risk / availability
-    "contract_months_remaining",
+    # Injury risk — computed relative to transfer date so no temporal leakage
     "injury_days_last_2y",
     "has_serious_injury",
+    # Excluded: contract_months_remaining — TM only exposes the *current* contract,
+    # so training rows get a future contract signed after the transfer (temporal leakage).
+    # Excluded: tkl_won_p90, interceptions_p90 — FBref misc match rate is ~47% in
+    # training (non-Big-5 fallback rows have no FBref data), but 64% in inference pool.
+    # Partial coverage with position-average fill creates train/inference mismatch.
+    # These are kept in STAT_COLS for display in the UI (radar charts, Data Explorer).
+    # Excluded: prog_passes_p90, pass_completion_pct, take_ons_p90,
+    # prog_carries_p90, aerials_won_p90 — position×market-value heuristics;
+    # FBref passing/possession pages use JS rendering, not available via static HTML.
 ]
 CLUB_STAT_COLS = ["ppda", "possession_pct", "directness_idx", "line_height_m"]
 POSITIONS = ["GK", "DEF", "MID", "ATT"]
@@ -61,14 +66,19 @@ class FeatureConfig:
 
 
 def build_player_features(df: pd.DataFrame, fit: FeatureConfig | None = None) -> tuple[np.ndarray, FeatureConfig]:
-    """Player features: per-90 stats + age + log(market_value) + position one-hot + league strength."""
+    """Player features: per-90 stats + log(market_value) + position one-hot.
+
+    Two features intentionally excluded:
+    - age: already in transfer context (transfer_age_norm); including it here
+      creates a duplicate that dominates predictions producing age-sorted rankings.
+    - orig_lg_* one-hots: bake in a ~10pt Premier League origin bonus regardless
+      of player quality. Destination league is already in the club tower, so
+      cross-league fit is captured without penalising Ligue 1/Bundesliga players.
+    """
     feats = df[PLAYER_STAT_COLS].copy()
-    feats["age_norm"] = (df["age"] - 25) / 5
     feats["log_value"] = np.log1p(df["market_value_eur_m"])
     for p in POSITIONS:
         feats[f"pos_{p}"] = (df["position_group"] == p).astype(float)
-    for lg in LEAGUES:
-        feats[f"orig_lg_{lg}"] = (df["league"] == lg).astype(float)
 
     cols = feats.columns.tolist()
     X = feats.values.astype(np.float32)
@@ -103,9 +113,13 @@ def build_club_features(df: pd.DataFrame, fit: FeatureConfig | None = None) -> t
 
 
 def build_transfer_context(transfers_df: pd.DataFrame, fit: FeatureConfig | None = None) -> tuple[np.ndarray, FeatureConfig]:
-    """Transfer-level context: age at transfer, fee."""
+    """Transfer-level context: fee only.
+
+    transfer_age_norm intentionally excluded — it was the model's dominant
+    predictor at inference (corr +0.72 with fit_score), sorting recommendations
+    purely by age. Age filtering is handled upstream by Filters(min_age, max_age).
+    """
     feats = pd.DataFrame({
-        "transfer_age_norm": (transfers_df["transfer_age"] - 25) / 5,
         "log_fee": np.log1p(transfers_df["fee_eur_m"]),
     })
     cols = feats.columns.tolist()
@@ -121,9 +135,6 @@ def build_transfer_context(transfers_df: pd.DataFrame, fit: FeatureConfig | None
         cfg = fit
     Xs = scaler.transform(X).astype(np.float32)
     return Xs, cfg
-
-
-_PLAYER_EMBED_COLS = PLAYER_STAT_COLS + ["age", "market_value_eur_m", "position_group", "league"]
 
 
 def assemble_training_arrays(
@@ -184,7 +195,7 @@ class _MLP(nn.Module):
 
 class TwoTowerFitModel(nn.Module):
     """
-    Player tower → 32-d player embedding
+    Player tower → 32-d player embedding  (15 feats: 10 stat cols + log_value + 4 pos)
     Club tower   → 32-d club embedding
     Head: concat(p_emb ⊙ c_emb, |p_emb − c_emb|, transfer_ctx) → MLP → sigmoid fit score
     """
@@ -211,8 +222,28 @@ class TwoTowerFitModel(nn.Module):
 
 # --- training loop -----------------------------------------------------------
 
+def _player_split(
+    n: int, player_ids: np.ndarray, val_frac: float, test_frac: float, seed: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split row indices so no player appears in more than one partition."""
+    unique_pids = np.unique(player_ids)
+    rng = np.random.default_rng(seed)
+    shuffled = unique_pids[rng.permutation(len(unique_pids))]
+    n_test_p = int(len(shuffled) * test_frac)
+    n_val_p  = int(len(shuffled) * val_frac)
+    test_pids  = set(shuffled[:n_test_p])
+    val_pids   = set(shuffled[n_test_p:n_test_p + n_val_p])
+    rows = np.arange(n)
+    flags = np.array([
+        0 if pid in test_pids else (1 if pid in val_pids else 2)
+        for pid in player_ids
+    ])
+    return rows[flags == 2], rows[flags == 1], rows[flags == 0]  # train, val, test
+
+
 def train_two_tower(
     player_X: np.ndarray, club_X: np.ndarray, ctx_X: np.ndarray, y: np.ndarray,
+    player_ids: np.ndarray | None = None,
     val_frac: float = 0.15, test_frac: float = 0.15,
     epochs: int = 300, batch_size: int = 256, lr: float = 5e-4,
     weight_decay: float = 1e-4, patience: int = 25, seed: int = 0,
@@ -221,12 +252,15 @@ def train_two_tower(
     """Train with early stopping on validation loss. Returns model + metrics dict."""
     torch.manual_seed(seed)
     n = len(y)
-    perm = np.random.default_rng(seed).permutation(n)
-    n_test = int(n * test_frac)
-    n_val = int(n * val_frac)
-    test_idx = perm[:n_test]
-    val_idx = perm[n_test:n_test + n_val]
-    train_idx = perm[n_test + n_val:]
+    if player_ids is not None:
+        train_idx, val_idx, test_idx = _player_split(n, player_ids, val_frac, test_frac, seed)
+    else:
+        perm = np.random.default_rng(seed).permutation(n)
+        n_test = int(n * test_frac)
+        n_val  = int(n * val_frac)
+        test_idx  = perm[:n_test]
+        val_idx   = perm[n_test:n_test + n_val]
+        train_idx = perm[n_test + n_val:]
 
     def _t(a, idx): return torch.from_numpy(a[idx])
 

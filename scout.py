@@ -47,6 +47,7 @@ class Filters:
     min_minutes: int = 900
     leagues: list[str] | None = None
     contract_ends_before: pd.Timestamp | None = None
+    max_contract_months: int | None = None
 
 
 @dataclass
@@ -82,6 +83,8 @@ def apply_filters(df: pd.DataFrame, f: Filters) -> pd.DataFrame:
         out = out[out["league"].isin(f.leagues)]
     if f.contract_ends_before is not None and "contract_expiration_date" in out.columns:
         out = out[out["contract_expiration_date"] <= f.contract_ends_before]
+    if f.max_contract_months is not None and "contract_months_remaining" in out.columns:
+        out = out[out["contract_months_remaining"].fillna(999) <= f.max_contract_months]
     return out.reset_index(drop=True)
 
 
@@ -137,7 +140,10 @@ def compute_fit_score(
     c_X_one, _ = build_club_features(_destination_to_df(destination), cfg)
     c_X = np.tile(c_X_one, (len(candidates), 1))
 
-    # If no explicit context, use defaults: candidate age, candidate value
+    # Context uses per-candidate values: the model learned that transfer age and
+    # fee are predictive of transfer outcomes, and these signals also serve as
+    # useful quality proxies. The resulting age/value gradient in scores is mild
+    # and acceptable given the model's overall R²≈0.08.
     ages = candidates["age"].values if transfer_age is None else np.full(len(candidates), transfer_age)
     fees = candidates["market_value_eur_m"].values if fee_eur_m is None else np.full(len(candidates), fee_eur_m)
     ctx_df = pd.DataFrame({"transfer_age": ages, "fee_eur_m": fees})
@@ -155,8 +161,12 @@ def compute_fit_score(
     out["fit_raw"] = raw.round(4)
     out["fit_score"] = normalised.round(1)
 
-    # Per-position percentile ranks on key stats — same UX as v2
-    for col in PLAYER_STAT_COLS:
+    # Percentile ranks for model features + extra display columns used in the UI
+    _DISPLAY_EXTRA = [
+        "prog_carries_p90", "pass_completion_pct", "prog_passes_p90",
+        "take_ons_p90", "aerials_won_p90", "contract_months_remaining",
+    ]
+    for col in PLAYER_STAT_COLS + _DISPLAY_EXTRA:
         if col in out.columns:
             out[f"{col}_pct_rank"] = (
                 out[col].rank(pct=True).fillna(0.5) * 100

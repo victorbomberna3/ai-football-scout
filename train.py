@@ -30,7 +30,8 @@ from model import assemble_training_arrays, train_two_tower
 SEED = 0
 OUT = Path("models")
 
-USE_SYNTHETIC = "--synthetic" in sys.argv
+USE_SYNTHETIC  = "--synthetic" in sys.argv
+FILTER_LOANS   = "--include-loans" not in sys.argv   # drop loan transfers by default
 
 
 def main():
@@ -52,27 +53,39 @@ def main():
 
     # 2. Features
     print("\n[2] Building feature arrays…")
-    if "n_apps" in data["transfers"].columns:
-        transfers_clean = data["transfers"][data["transfers"]["n_apps"] > 0].reset_index(drop=True)
-        players_train = data["players"]
+    t = data["transfers"]
+    n_raw = len(t)
+
+    # Filter 1: drop rows with no TM season data (zero-stat noise, not "bad players")
+    if "apps_pct_season" in t.columns:
+        t = t[t["apps_pct_season"] > 0].copy()
+    print(f"    after dropping zero-stat rows (apps_pct=0): {len(t):,} / {n_raw:,}")
+
+    # Filter 2: drop loan transfers — they reflect temporary logistics, not club fit
+    if FILTER_LOANS and "is_loan" in t.columns:
+        n_before = len(t)
+        t = t[~t["is_loan"]].copy()
+        print(f"    after dropping loans:                    {len(t):,} / {n_before:,}  (--include-loans to keep)")
     else:
-        # n_apps not embedded in transfers (synthetic path) — filter on players instead
-        transfers_clean = data["transfers"].reset_index(drop=True)
-        players_train = data["players"][data["players"]["n_apps"] > 0]
-    print(f"    transfers after quality filter (n_apps>0): {len(transfers_clean):,} / {len(data['transfers']):,}")
+        print(f"    loans kept (FILTER_LOANS=False or is_loan column absent)")
+
+    transfers_clean = t.reset_index(drop=True)
+    players_train = data["players"]
+    print(f"    final training set:                      {len(transfers_clean):,} transfers")
     p_X, c_X, ctx_X, y, cfg = assemble_training_arrays(
         players_train, data["clubs"], transfers_clean
     )
+    player_ids = transfers_clean["player_id"].values
     print(f"    player feats: {p_X.shape[1]} | club feats: {c_X.shape[1]} | "
           f"ctx feats: {ctx_X.shape[1]}")
 
     # 3. Baselines
     print("\n[3] Training baselines (cosine, linear, GBM)…")
-    base = evaluate_baselines(p_X, c_X, ctx_X, y, seed=SEED)
+    base = evaluate_baselines(p_X, c_X, ctx_X, y, seed=SEED, player_ids=player_ids)
 
     # 4. Two-tower
     print("\n[4] Training two-tower model…")
-    model, tt_metrics = train_two_tower(p_X, c_X, ctx_X, y, seed=SEED, verbose=True)
+    model, tt_metrics = train_two_tower(p_X, c_X, ctx_X, y, player_ids=player_ids, seed=SEED, verbose=True)
 
     # 5. Report
     print("\n" + "=" * 60)
