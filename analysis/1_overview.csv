@@ -1,0 +1,37 @@
+dataset,metric,value
+players,Total rows,2700
+players,Unique players,2700
+players,Season,2024-25
+players,Missing values (any column),0
+players,Leagues covered,5
+players,Position breakdown — GK,237
+players,Position breakdown — DEF,965
+players,Position breakdown — MID,765
+players,Position breakdown — ATT,733
+players,Age min,15.0
+players,Age mean,25.7
+players,Age max,42.3
+players,Market value median (M€),5.5
+clubs,Total rows,135
+clubs,Leagues covered,5
+clubs,Possession pct mean,47.9
+clubs,PPDA mean,14.4
+clubs,Directness index mean,0.357
+clubs,Line height mean (m),55.4
+transfers,Total rows,3597
+transfers,Unique players,1627
+transfers,Overlap with scouting pool,1627
+transfers,Date range start,2018-01-01
+transfers,Date range end,2023-12-31
+transfers,Rows with n_apps > 0 (usable),2687
+transfers,Rows with n_apps = 0 (no stats),910
+transfers,survival_2y known,2025
+transfers,survival_2y missing (too recent),1572
+transfers,success_score mean,0.432
+transfers,success_score std,0.211
+transfers,minutes_share_y1 mean,0.301
+transfers,value_delta_18m mean,0.778
+transfers,Avg transfers per player,2.21
+transfers,Players with 1 transfer,779
+transfers,Players with 2 transfers,385
+transfers,Players with 3+ transfers,463

@@ -1,0 +1,35 @@
+column,source,dataset,non_null,zero_pct,min,p25,median,p75,max,mean,std
+goals_p90,Real (TM appearances),players,2700,35.9,0.0,0.0,0.057,0.182,1.169,0.122,0.165
+goals_p90,Real (TM appearances),transfers,3597,34.5,0.0,0.0,0.062,0.205,3.0,0.149,0.201
+assists_p90,Real (TM appearances),players,2700,35.8,0.0,0.0,0.058,0.145,0.989,0.091,0.11
+assists_p90,Real (TM appearances),transfers,3597,35.0,0.0,0.0,0.062,0.18,1.192,0.106,0.13
+yellow_cards_p90,Real (TM appearances),players,2700,14.0,0.0,0.084,0.167,0.259,2.0,0.191,0.171
+yellow_cards_p90,Real (TM appearances),transfers,3597,42.3,0.0,0.0,0.088,0.233,1.519,0.145,0.188
+avg_min_per_game,Real (TM appearances),players,2700,0.0,8.1,46.6,63.4,77.6,90.0,61.069,20.149
+avg_min_per_game,Real (TM appearances),transfers,3597,25.3,0.0,0.0,56.6,78.8,90.0,48.58,33.368
+n_apps,Real (TM appearances),players,2700,0.0,1.0,20.0,35.0,55.0,75.0,36.779,20.03
+n_apps,Real (TM appearances),transfers,3597,25.3,0.0,0.0,16.0,29.0,54.0,15.947,13.479
+npxg_p90,Proxied (×multiplier),players,2700,35.9,0.0,0.0,0.05,0.16,1.029,0.107,0.146
+npxg_p90,Proxied (×multiplier),transfers,3597,57.4,0.0,0.0,0.0,0.123,2.64,0.09,0.167
+key_passes_p90,Proxied (×multiplier),players,2700,35.8,0.0,0.0,0.116,0.29,1.978,0.182,0.22
+key_passes_p90,Proxied (×multiplier),transfers,3597,57.9,0.0,0.0,0.0,0.224,2.384,0.151,0.261
+prog_passes_p90,Heuristic (pos×value),players,2700,0.0,1.0,1.4,1.9,2.75,5.203,2.078,0.722
+prog_passes_p90,Heuristic (pos×value),transfers,3597,25.3,0.0,0.0,1.678,2.17,4.557,1.513,1.056
+pass_completion_pct,Heuristic (pos×value),players,2700,0.0,68.0,78.0,80.0,83.0,83.9,79.329,3.98
+pass_completion_pct,Heuristic (pos×value),transfers,3597,25.3,0.0,0.0,78.2,80.1,83.7,59.272,34.665
+take_ons_p90,Heuristic (pos×value),players,2700,0.0,0.05,0.35,0.7,1.4,2.8,0.771,0.534
+take_ons_p90,Heuristic (pos×value),transfers,3597,25.3,0.0,0.0,0.35,0.804,2.532,0.568,0.549
+prog_carries_p90,Heuristic (pos×value),players,2700,0.0,0.15,0.6,1.1,1.6,3.2,1.058,0.556
+prog_carries_p90,Heuristic (pos×value),transfers,3597,25.3,0.0,0.0,0.6,1.263,2.894,0.778,0.639
+aerials_won_p90,Heuristic (pos×value),players,2700,0.0,0.35,0.45,0.553,1.4,2.382,0.866,0.511
+aerials_won_p90,Heuristic (pos×value),transfers,3597,25.3,0.0,0.0,0.45,1.4,2.287,0.618,0.553
+mv_momentum_12m,Real (TM valuations),players,2700,21.6,-0.875,-0.2,0.0,0.593,3.0,0.414,0.992
+mv_momentum_12m,Real (TM valuations),transfers,3597,41.1,-0.75,0.0,0.0,0.6,3.0,0.502,1.014
+market_value_eur_m,Real (TM valuations),players,2700,0.0,0.025,2.0,5.5,15.0,200.0,12.428,18.136
+market_value_eur_m,Real (TM valuations),transfers,3597,0.0,0.05,2.4,5.0,9.0,120.0,8.084,10.435
+contract_months_remaining,Real (contract/injury),players,2700,0.0,0.2,1.1,25.2,37.2,109.1,23.145,17.805
+contract_months_remaining,Real (contract/injury),transfers,3597,0.0,12.0,59.166,79.731,95.959,173.916,76.937,27.468
+injury_days_last_2y,Real (contract/injury),players,2700,51.1,0.0,0.0,0.0,30.0,431.0,24.831,48.982
+injury_days_last_2y,Real (contract/injury),transfers,3597,59.6,0.0,0.0,0.0,18.0,686.0,18.018,41.771
+has_serious_injury,Real (contract/injury),players,2700,86.1,0.0,0.0,0.0,0.0,1.0,0.139,0.346
+has_serious_injury,Real (contract/injury),transfers,3597,90.9,0.0,0.0,0.0,0.0,1.0,0.091,0.287
