@@ -31,7 +31,7 @@ import torch
 from model import (
     TwoTowerFitModel, FeatureConfig,
     build_player_features, build_club_features, build_transfer_context,
-    PLAYER_STAT_COLS, CLUB_STAT_COLS, LEAGUES,
+    PLAYER_STAT_COLS, CLUB_STAT_COLS, LEAGUES, LEAGUE_TIER,
 )
 
 MODEL_DIR = Path("models")
@@ -146,7 +146,9 @@ def compute_fit_score(
     # and acceptable given the model's overall R²≈0.08.
     ages = candidates["age"].values if transfer_age is None else np.full(len(candidates), transfer_age)
     fees = candidates["market_value_eur_m"].values if fee_eur_m is None else np.full(len(candidates), fee_eur_m)
-    ctx_df = pd.DataFrame({"transfer_age": ages, "fee_eur_m": fees})
+    dest_tier = LEAGUE_TIER.get(destination.league, 2)
+    origin_tiers = candidates["league"].map(lambda lg: LEAGUE_TIER.get(lg, 1)).values
+    ctx_df = pd.DataFrame({"transfer_age": ages, "fee_eur_m": fees, "league_step": dest_tier - origin_tiers})
     ctx_X, _ = build_transfer_context(ctx_df, cfg)
 
     with torch.no_grad():

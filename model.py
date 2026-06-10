@@ -53,6 +53,16 @@ CLUB_STAT_COLS = ["ppda", "possession_pct", "directness_idx", "line_height_m"]
 POSITIONS = ["GK", "DEF", "MID", "ATT"]
 LEAGUES = ["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
 
+# UEFA-coefficient-based league strength tiers (non-Big5 = 1).
+# Used to compute league_step = destination_tier - origin_tier as a transfer context feature.
+LEAGUE_TIER = {
+    "Premier League": 5,
+    "La Liga": 4,
+    "Bundesliga": 3,
+    "Serie A": 3,
+    "Ligue 1": 2,
+}
+
 
 @dataclass
 class FeatureConfig:
@@ -121,6 +131,7 @@ def build_transfer_context(transfers_df: pd.DataFrame, fit: FeatureConfig | None
     """
     feats = pd.DataFrame({
         "log_fee": np.log1p(transfers_df["fee_eur_m"]),
+        "league_step": transfers_df["league_step"].fillna(0.0) if "league_step" in transfers_df.columns else np.zeros(len(transfers_df)),
     })
     cols = feats.columns.tolist()
     X = feats.values.astype(np.float32)

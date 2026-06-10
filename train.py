@@ -54,11 +54,9 @@ def main():
     print("\n[2] Building feature arrays…")
     if "n_apps" in data["transfers"].columns:
         transfers_clean = data["transfers"][data["transfers"]["n_apps"] > 0].reset_index(drop=True)
-        players_train = data["players"]
     else:
-        # n_apps not embedded in transfers (synthetic path) — filter on players instead
         transfers_clean = data["transfers"].reset_index(drop=True)
-        players_train = data["players"][data["players"]["n_apps"] > 0]
+    players_train = data["players"]
     print(f"    transfers after quality filter (n_apps>0): {len(transfers_clean):,} / {len(data['transfers']):,}")
     p_X, c_X, ctx_X, y, cfg = assemble_training_arrays(
         players_train, data["clubs"], transfers_clean

@@ -41,6 +41,8 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
+from model import LEAGUE_TIER
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -836,6 +838,11 @@ def build_transfers_df(
         .to_dict()
     )
 
+    club_league_map = clubs_df.set_index("club_id")["league"].to_dict()
+    from_tier = transfers["from_club_id"].map(club_league_map).map(LEAGUE_TIER).fillna(1)
+    to_tier   = transfers["to_club_id"].map(club_league_map).map(LEAGUE_TIER).fillna(1)
+    transfers["league_step"] = (to_tier - from_tier).astype(float)
+
     out_transfers = tm["transfers"].copy()
     out_transfers["transfer_date"] = pd.to_datetime(out_transfers["transfer_date"], errors="coerce")
 
@@ -1116,6 +1123,7 @@ def build_transfers_df(
         "minutes_share_y1", "value_delta_18m", "survival_2y",
         "goal_contribution_y1", "success_score",
         "contract_months_remaining", "injury_days_last_2y", "has_serious_injury",
+        "league_step",
     ] + embed_cols
     out = transfers[[c for c in out_cols if c in transfers.columns]].copy()
     out = out.rename(columns={"to_club_id": "destination_club_id", "transfer_fee": "fee_eur_m"})
@@ -1171,6 +1179,11 @@ def generate(
             players_df = pd.read_parquet(cached[0])
             clubs_df = pd.read_parquet(cached[1])
             transfers_df = pd.read_parquet(cached[2])
+            if "league_step" not in transfers_df.columns:
+                club_league = clubs_df.set_index("club_id")["league"].to_dict()
+                dest_tier = transfers_df["destination_club_id"].map(club_league).map(LEAGUE_TIER).fillna(1)
+                orig_tier = transfers_df["league"].map(LEAGUE_TIER).fillna(1)
+                transfers_df["league_step"] = (dest_tier - orig_tier).astype(float)
             print(f"  players={len(players_df):,}  clubs={len(clubs_df):,}  "
                   f"transfers={len(transfers_df):,}")
             return {"players": players_df, "clubs": clubs_df, "transfers": transfers_df}
