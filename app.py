@@ -24,6 +24,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+if "scout_run" not in st.session_state:
+    st.session_state.scout_run = False
+
 # ─── Plotly light theme ───────────────────────────────────────────
 PLOTLY = dict(
     plot_bgcolor  = "#ffffff",
@@ -271,6 +274,7 @@ pool["current_club"] = pool["current_club_id"].map(_club_id_to_name).fillna("—
 with st.sidebar:
     st.markdown("### Football Scout")
 
+    # ── Player filters (inside form — batched on Scout click) ─────
     with st.form("scout_form"):
         st.caption("PLAYER FILTERS")
         position    = st.selectbox("Position", ["ATT", "MID", "DEF", "GK"])
@@ -301,92 +305,100 @@ with st.sidebar:
             "Injury watch list",
             help="Re-score players with serious injury history as if injury-free and show them separately — good fits that carry medical risk.",
         )
+        top_n = st.slider("Show top N", 5, 30, 10)
 
-        st.caption("DESTINATION CLUB")
+        _submitted = st.form_submit_button("Scout", use_container_width=True, type="primary")
+        if _submitted:
+            st.session_state.scout_run = True
 
-        # ── Real club picker ──────────────────────────────────────
-        LEAGUE_ORDER = ["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
-        _club_options  = ["— Manual / style preset —"]
-        _club_row_map  = {}
-        for _lg in LEAGUE_ORDER:
-            _sub = club_presets_df[club_presets_df["league"] == _lg]
-            for _, _row in _sub.iterrows():
-                _label = f"{_row['display_name']}  ({LEAGUE_FLAGS.get(_lg, _lg[:3])})"
-                _club_options.append(_label)
-                _club_row_map[_label] = _row
+    if st.session_state.scout_run:
+        if st.button("Reset", use_container_width=True):
+            st.session_state.scout_run = False
+            st.rerun()
 
-        selected_club_label = st.selectbox("Select a club", _club_options)
-        _real_club = _club_row_map.get(selected_club_label)
+    # ── Destination club (outside form — updates live on selection) ─
+    st.divider()
+    st.caption("DESTINATION CLUB")
 
-        if _real_club is not None:
-            ppda           = float(_real_club["ppda"])
-            possession_pct = float(_real_club["possession_pct"])
-            directness_idx = float(_real_club["directness_idx"])
-            line_height_m  = float(_real_club["line_height_m"])
-            st.caption(
-                f"Tactical profile auto-filled from **{_real_club['display_name']}** "
-                f"(avg 2018–2024) — PPDA {ppda:.1f} · Poss {possession_pct:.0f}% · "
-                f"Directness {directness_idx:.2f} · Line {line_height_m:.0f}m"
-            )
-        else:
-            PRESETS = {
-                "Custom":                     None,
-                "High possession / technical": dict(ppda=15.8, possession_pct=66, directness_idx=0.34, line_height_m=64),
-                "Balanced pressing":           dict(ppda=15.2, possession_pct=54, directness_idx=0.38, line_height_m=58),
-                "Physical / direct":           dict(ppda=13.5, possession_pct=46, directness_idx=0.48, line_height_m=50),
-                "Low block / counter":         dict(ppda=13.0, possession_pct=41, directness_idx=0.55, line_height_m=43),
-            }
-            preset_name = st.selectbox("Style preset", list(PRESETS.keys()))
-            preset      = PRESETS[preset_name]
-            if preset:
-                ppda, possession_pct          = preset["ppda"], preset["possession_pct"]
-                directness_idx, line_height_m = preset["directness_idx"], preset["line_height_m"]
-            else:
-                ppda           = st.slider("Play style (↑ = more technical / possession)", 12.0, 16.5, 14.5, 0.1)
-                possession_pct = st.slider("Possession %", 30, 70, 52)
-                directness_idx = st.slider("Directness", 0.20, 0.65, 0.40, 0.01)
-                line_height_m  = st.slider("Line height (m)", 25, 65, 48)
+    LEAGUE_ORDER = ["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
+    _club_options  = ["— Manual / style preset —"]
+    _club_row_map  = {}
+    for _lg in LEAGUE_ORDER:
+        _sub = club_presets_df[club_presets_df["league"] == _lg]
+        for _, _row in _sub.iterrows():
+            _label = f"{_row['display_name']}  ({LEAGUE_FLAGS.get(_lg, _lg[:3])})"
+            _club_options.append(_label)
+            _club_row_map[_label] = _row
 
-        press_val = round((ppda - 12.0) / 4.5 * 100)   # 12 (physical) → 16.5 (technical)
-        poss_val  = round((possession_pct - 30) / 40 * 100)
-        dir_val   = round((directness_idx - 0.20) / 0.45 * 100)
-        line_val  = round((line_height_m - 25) / 40 * 100)
+    selected_club_label = st.selectbox("Select a club", _club_options)
+    _real_club = _club_row_map.get(selected_club_label)
 
-        dna_labels        = ["Technical", "Possession", "Directness", "Line height"]
-        dna_vals          = [press_val, poss_val, dir_val, line_val]
-        dna_vals_closed   = dna_vals + [dna_vals[0]]
-        dna_labels_closed = dna_labels + [dna_labels[0]]
-
-        fig_dna = go.Figure(go.Scatterpolar(
-            r=dna_vals_closed,
-            theta=dna_labels_closed,
-            fill="toself",
-            fillcolor="rgba(37,99,235,0.15)",
-            line_color="#2563eb",
-            line_width=2,
-        ))
-        fig_dna.update_layout(
-            polar=dict(
-                radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor="#e2e8f0"),
-                angularaxis=dict(tickfont=dict(size=10, color="#374151"), gridcolor="#e2e8f0"),
-                bgcolor="#ffffff",
-            ),
-            margin=dict(l=10, r=10, t=0, b=0),
-            height=160,
-            paper_bgcolor="#f8fafc",
+    if _real_club is not None:
+        ppda           = float(_real_club["ppda"])
+        possession_pct = float(_real_club["possession_pct"])
+        directness_idx = float(_real_club["directness_idx"])
+        line_height_m  = float(_real_club["line_height_m"])
+        st.caption(
+            f"Tactical profile auto-filled from **{_real_club['display_name']}** "
+            f"(avg 2018–2024) — PPDA {ppda:.1f} · Poss {possession_pct:.0f}% · "
+            f"Directness {directness_idx:.2f} · Line {line_height_m:.0f}m"
         )
-        st.plotly_chart(fig_dna, use_container_width=True)
-
-        league_options = sorted(pool["league"].dropna().unique().tolist())
-        if _real_club is not None:
-            _auto_lg   = str(_real_club["league"])
-            _lg_idx    = league_options.index(_auto_lg) if _auto_lg in league_options else 0
-            dest_league = st.selectbox("Destination league", league_options, index=_lg_idx)
+    else:
+        PRESETS = {
+            "Custom":                      None,
+            "High possession / technical": dict(ppda=15.8, possession_pct=66, directness_idx=0.34, line_height_m=64),
+            "Balanced pressing":           dict(ppda=15.2, possession_pct=54, directness_idx=0.38, line_height_m=58),
+            "Physical / direct":           dict(ppda=13.5, possession_pct=46, directness_idx=0.48, line_height_m=50),
+            "Low block / counter":         dict(ppda=13.0, possession_pct=41, directness_idx=0.55, line_height_m=43),
+        }
+        preset_name = st.selectbox("Style preset", list(PRESETS.keys()))
+        preset      = PRESETS[preset_name]
+        if preset:
+            ppda, possession_pct          = preset["ppda"], preset["possession_pct"]
+            directness_idx, line_height_m = preset["directness_idx"], preset["line_height_m"]
         else:
-            dest_league = st.selectbox("Destination league", league_options)
-        top_n          = st.slider("Show top N", 5, 30, 10)
+            ppda           = st.slider("Play style (↑ = more technical / possession)", 12.0, 16.5, 14.5, 0.1)
+            possession_pct = st.slider("Possession %", 30, 70, 52)
+            directness_idx = st.slider("Directness", 0.20, 0.65, 0.40, 0.01)
+            line_height_m  = st.slider("Line height (m)", 25, 65, 48)
 
-        st.form_submit_button("Scout", use_container_width=True, type="primary")
+    press_val = round((ppda - 12.0) / 4.5 * 100)
+    poss_val  = round((possession_pct - 30) / 40 * 100)
+    dir_val   = round((directness_idx - 0.20) / 0.45 * 100)
+    line_val  = round((line_height_m - 25) / 40 * 100)
+
+    dna_labels        = ["Technical", "Possession", "Directness", "Line height"]
+    dna_vals          = [press_val, poss_val, dir_val, line_val]
+    dna_vals_closed   = dna_vals + [dna_vals[0]]
+    dna_labels_closed = dna_labels + [dna_labels[0]]
+
+    fig_dna = go.Figure(go.Scatterpolar(
+        r=dna_vals_closed,
+        theta=dna_labels_closed,
+        fill="toself",
+        fillcolor="rgba(37,99,235,0.15)",
+        line_color="#2563eb",
+        line_width=2,
+    ))
+    fig_dna.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor="#e2e8f0"),
+            angularaxis=dict(tickfont=dict(size=10, color="#374151"), gridcolor="#e2e8f0"),
+            bgcolor="#ffffff",
+        ),
+        margin=dict(l=10, r=10, t=0, b=0),
+        height=160,
+        paper_bgcolor="#f8fafc",
+    )
+    st.plotly_chart(fig_dna, use_container_width=True)
+
+    league_options = sorted(pool["league"].dropna().unique().tolist())
+    if _real_club is not None:
+        _auto_lg    = str(_real_club["league"])
+        _lg_idx     = league_options.index(_auto_lg) if _auto_lg in league_options else 0
+        dest_league = st.selectbox("Destination league", league_options, index=_lg_idx)
+    else:
+        dest_league = st.selectbox("Destination league", league_options)
 
 # ─── Shared scoring ───────────────────────────────────────────────
 filters     = Filters(position=position, max_value_eur_m=float(budget),
@@ -430,6 +442,18 @@ tab_scout, tab_similar, tab_data, tab_model = st.tabs([
 # TAB 1 — SCOUT
 # ═══════════════════════════════════════════════════
 with tab_scout:
+    if not st.session_state.scout_run:
+        st.markdown(
+            "<div style='text-align:center;padding:100px 20px 60px'>"
+            "<p style='font-size:1.4rem;font-weight:600;color:#1e293b;margin:12px 0 8px'>"
+            "Ready to scout</p>"
+            "<p style='color:#64748b;font-size:0.95rem'>"
+            "Set your filters in the sidebar and click <strong>Scout</strong> to generate a report.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+
     if len(candidates) == 0:
         st.warning("No players match these filters — try relaxing age, budget or minutes.")
         st.stop()
@@ -586,41 +610,50 @@ with tab_scout:
 
     st.divider()
 
-    # ── Player profile radar ───────────────────────────────────
+    # ── Player profile radars — one per player ────────────────
     st.markdown("##### Player profiles — top 5")
-    st.caption("Percentile vs Big-5 peers at the same position. Hover a player name in the legend to isolate their trace.")
+    st.caption("Percentile vs Big-5 peers at the same position.")
 
-    _, radar_col, _ = st.columns([1, 8, 1])
-    with radar_col:
-        RADAR_COLORS = ["#2563eb","#059669","#d97706","#dc2626","#7c3aed"]
-        fig_radar = go.Figure()
-        for i, (_, row) in enumerate(top.head(5).iterrows()):
-            vals = [
-                min(float(row.get(c, 0)) / max(float(pool[c].quantile(0.95)), 1e-6) * 100, 100)
-                for c in RADAR_COLS
-            ]
-            vals.append(vals[0])
-            fig_radar.add_trace(go.Scatterpolar(
-                r=vals, theta=RADAR_LABELS + [RADAR_LABELS[0]],
-                fill="toself",
-                fillcolor=f"rgba({','.join(str(int(c,16)) for c in [RADAR_COLORS[i][1:3], RADAR_COLORS[i][3:5], RADAR_COLORS[i][5:7]])},{ 0.12 if i == 0 else 0.05 })",
-                name=row["player_name"],
-                line_color=RADAR_COLORS[i],
-                line_width=2.5 if i == 0 else 1.5,
-            ))
-        fig_radar.update_layout(
-            **pl(margin=dict(l=20, r=20, t=20, b=90)),
-            polar=POLAR_STYLE,
-            showlegend=True,
-            legend=dict(
-                orientation="h", yanchor="top", y=-0.12,
-                xanchor="center", x=0.5,
-                font=dict(size=11, color="#374151"),
-                bgcolor="rgba(0,0,0,0)",
+    RADAR_COLORS = ["#2563eb","#059669","#d97706","#dc2626","#7c3aed"]
+    top5 = top.head(5)
+    radar_cols = st.columns(len(top5))
+    for i, ((_, row), col) in enumerate(zip(top5.iterrows(), radar_cols)):
+        vals = [
+            min(float(row.get(c, 0)) / max(float(pool[c].quantile(0.95)), 1e-6) * 100, 100)
+            for c in RADAR_COLS
+        ]
+        vals.append(vals[0])
+        color = RADAR_COLORS[i]
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        fig_r = go.Figure(go.Scatterpolar(
+            r=vals, theta=RADAR_LABELS + [RADAR_LABELS[0]],
+            fill="toself",
+            fillcolor=f"rgba({r},{g},{b},0.15)",
+            line_color=color,
+            line_width=2,
+        ))
+        fig_r.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor="#e2e8f0"),
+                angularaxis=dict(tickfont=dict(size=9, color="#374151"), gridcolor="#e2e8f0"),
+                bgcolor="#ffffff",
             ),
-            height=440,
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=240,
+            paper_bgcolor="#f8fafc",
+            showlegend=False,
         )
-        st.plotly_chart(fig_radar, use_container_width=True)
+        with col:
+            st.plotly_chart(fig_r, use_container_width=True)
+            fit = row["fit_score"]
+            rank_label = f"#{i+1}{'  · Top pick' if i == 0 else ''}"
+            st.markdown(
+                f"<p style='text-align:center;margin:0;font-size:0.8rem;font-weight:600;"
+                f"color:{color};line-height:1.3'>{row['player_name']}</p>"
+                f"<p style='text-align:center;margin:0;font-size:0.72rem;color:#64748b'>"
+                f"{rank_label} &nbsp;·&nbsp; Fit {fit:.1f}</p>",
+                unsafe_allow_html=True,
+            )
 
     # ── Why these players fit — collapsible ───────────────────
     with st.expander("Why these players fit — top 5 breakdown"):
@@ -878,45 +911,51 @@ A/90: {target.get('assists_p90',0):.2f}
 
             st.divider()
 
-            # ── Centred radar ─────────────────────────────────────
+            # ── Side-by-side radars — target + top 3 similar ─────
             st.markdown(f"##### Player profiles — {target['player_name']} vs top 3 similar")
             st.caption("Percentile vs Big-5 peers at the same position. ★ = target player.")
 
-            _, cmp_col, _ = st.columns([1, 8, 1])
-            with cmp_col:
-                fig_cmp  = go.Figure()
-                all_p    = pd.concat([target.to_frame().T, similar.head(3)], ignore_index=True)
-                cmp_cols = ["#f59e0b","#10b981","#38bdf8","#f87171"]
-                for i, (_, row) in enumerate(all_p.iterrows()):
-                    vals = []
-                    for c in RADAR_COLS:
-                        v   = float(row.get(c, 0))
-                        q95 = float(pool[c].quantile(0.95))
-                        vals.append(min(v / max(q95, 1e-6) * 100, 100))
-                    vals.append(vals[0])
-                    lbl = str(row["player_name"]) + (" ★" if i == 0 else "")
-                    col = cmp_cols[i]
-                    r, g, b = int(col[1:3], 16), int(col[3:5], 16), int(col[5:7], 16)
-                    fig_cmp.add_trace(go.Scatterpolar(
-                        r=vals, theta=RADAR_LABELS + [RADAR_LABELS[0]],
-                        fill="toself",
-                        fillcolor=f"rgba({r},{g},{b},{0.12 if i == 0 else 0.05})",
-                        name=lbl,
-                        line_color=col, line_width=3 if i == 0 else 1.5,
-                    ))
-                fig_cmp.update_layout(
-                    **pl(margin=dict(l=20, r=20, t=20, b=90)),
-                    polar=POLAR_STYLE,
-                    showlegend=True,
-                    legend=dict(
-                        orientation="h", yanchor="top", y=-0.12,
-                        xanchor="center", x=0.5,
-                        font=dict(size=11, color="#374151"),
-                        bgcolor="rgba(0,0,0,0)",
+            all_p     = pd.concat([target.to_frame().T, similar.head(3)], ignore_index=True)
+            cmp_colors = ["#f59e0b","#10b981","#38bdf8","#f87171"]
+            cmp_cols_ui = st.columns(len(all_p))
+            for i, ((_, row), col) in enumerate(zip(all_p.iterrows(), cmp_cols_ui)):
+                vals = []
+                for c in RADAR_COLS:
+                    v   = float(row.get(c, 0))
+                    q95 = float(pool[c].quantile(0.95))
+                    vals.append(min(v / max(q95, 1e-6) * 100, 100))
+                vals.append(vals[0])
+                color = cmp_colors[i]
+                r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+                fig_r = go.Figure(go.Scatterpolar(
+                    r=vals, theta=RADAR_LABELS + [RADAR_LABELS[0]],
+                    fill="toself",
+                    fillcolor=f"rgba({r},{g},{b},0.15)",
+                    line_color=color,
+                    line_width=2,
+                ))
+                fig_r.update_layout(
+                    polar=dict(
+                        radialaxis=dict(visible=True, range=[0, 100], showticklabels=False, gridcolor="#e2e8f0"),
+                        angularaxis=dict(tickfont=dict(size=9, color="#374151"), gridcolor="#e2e8f0"),
+                        bgcolor="#ffffff",
                     ),
-                    height=440,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    height=240,
+                    paper_bgcolor="#f8fafc",
+                    showlegend=False,
                 )
-                st.plotly_chart(fig_cmp, use_container_width=True)
+                lbl = str(row["player_name"]) + (" ★" if i == 0 else "")
+                sim_pct = float(row.get("Similarity %", 100)) if i > 0 else None
+                sub = "Target" if i == 0 else f"Sim {sim_pct:.0f}%"
+                with col:
+                    st.plotly_chart(fig_r, use_container_width=True)
+                    st.markdown(
+                        f"<p style='text-align:center;margin:0;font-size:0.8rem;font-weight:600;"
+                        f"color:{color};line-height:1.3'>{lbl}</p>"
+                        f"<p style='text-align:center;margin:0;font-size:0.72rem;color:#64748b'>{sub}</p>",
+                        unsafe_allow_html=True,
+                    )
 
             # Comparable targets — similarity vs value
             st.divider()
