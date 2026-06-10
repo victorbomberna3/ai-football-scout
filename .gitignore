@@ -12,8 +12,8 @@ build/
 venv/
 env/
 
-# Data (large scraped files — regenerate with python train.py)
-data/
+# Scraped cache — regenerate with python train.py
+data/cache/
 downloaded_files/
 
 # Streamlit cache
