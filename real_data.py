@@ -608,8 +608,8 @@ def build_player_seasons_df(tm: dict[str, pd.DataFrame]) -> pd.DataFrame:
         apps["date"].dt.year + 1,
         apps["date"].dt.year,
     )
-    # Extend back to 2016 to cover transfers from 2018 onward (pre_season_year ≥ 2017)
-    apps = apps[(apps["season_end_year"] >= 2016) & (apps["season_end_year"] <= 2024)].copy()
+    # Extend back to 2014 to cover transfers from 2015 onward (pre_season_year ≥ 2014)
+    apps = apps[(apps["season_end_year"] >= 2014) & (apps["season_end_year"] <= 2024)].copy()
 
     apps["goals"] = pd.to_numeric(apps.get("goals", pd.Series(0, index=apps.index)), errors="coerce").fillna(0)
     apps["assists"] = pd.to_numeric(apps.get("assists", pd.Series(0, index=apps.index)), errors="coerce").fillna(0)
@@ -810,7 +810,7 @@ def build_transfers_df(
     transfers["transfer_date"] = pd.to_datetime(transfers["transfer_date"], errors="coerce")
     transfers = transfers.dropna(subset=["transfer_date"])
     transfers = transfers[
-        (transfers["transfer_date"] >= "2018-01-01") &
+        (transfers["transfer_date"] >= "2015-01-01") &
         (transfers["transfer_date"] < "2024-01-01")
     ].copy()
 
@@ -818,8 +818,8 @@ def build_transfers_df(
     valid_club_ids = set(clubs_df["club_id"].tolist())
     transfers = transfers[transfers["to_club_id"].isin(valid_club_ids)].copy()
 
-    # Keep only players we have FBref stats for
-    valid_player_ids = set(players_df["player_id"].tolist())
+    # Keep all players with any TM appearances data (not just the inference scouting pool)
+    valid_player_ids = set(player_seasons_df["player_id"].tolist())
     transfers = transfers[transfers["player_id"].isin(valid_player_ids)].copy()
 
     print(f"  {len(transfers):,} transfers to process for outcome labels...")
@@ -1064,7 +1064,17 @@ def build_transfers_df(
     transfers = transfers.drop(columns=["_contract_date"], errors="ignore")
 
     # --- Injury features at time of transfer (vectorized) ---
-    inj_df = fetch_player_injuries_bulk(transfers["player_id"].unique().tolist())
+    # Only look up players already in the injury cache — scraping thousands of new
+    # players would take 30+ minutes. New players default to 0.0 (no injury history).
+    all_transfer_pids = transfers["player_id"].unique().tolist()
+    if TM_INJURIES_CACHE.exists():
+        _cached_pids = set(
+            pd.read_parquet(TM_INJURIES_CACHE, columns=["player_id"])["player_id"].unique()
+        )
+        pids_for_injury = [p for p in all_transfer_pids if p in _cached_pids]
+    else:
+        pids_for_injury = all_transfer_pids
+    inj_df = fetch_player_injuries_bulk(pids_for_injury)
     if not inj_df.empty and "injury_date" in inj_df.columns:
         inj_clean = inj_df.dropna(subset=["injury_date"]).copy()
         inj_clean["injury_date"] = pd.to_datetime(inj_clean["injury_date"])
