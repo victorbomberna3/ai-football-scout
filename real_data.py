@@ -959,6 +959,7 @@ def build_transfers_df(
     fit_surprise_centered = fit_surprise_raw - pop_median  # centred ≈ 0
     # Clip to [-0.5, 0.5] then shift to [0, 1]; NaN rows (no baseline) → 0.5 (neutral)
     fit_surprise = (fit_surprise_centered.clip(-0.5, 0.5) + 0.5).fillna(0.5).values
+    transfers["_fit_surprise"] = fit_surprise  # preserved for loan label fix-up below
     # Use .values throughout to prevent index-alignment NaN after the merge
     surv_arr = surv_filled.values
     gc_arr   = gc_filled.values
@@ -1126,6 +1127,48 @@ def build_transfers_df(
 
     n_loans = transfers["is_loan"].sum()
     print(f"  {n_loans:,} transfers flagged as loans ({n_loans/len(transfers)*100:.0f}%)")
+
+    # --- Loan conversion: did the loan become a permanent transfer? ---
+    # A loan converts when the player signs a paid transfer back to the same
+    # destination club within 24 months. This replaces survival_2y in the loan
+    # success formula — survival is always 0 for loans by construction (they leave).
+    perm_moves = all_tm[
+        pd.to_numeric(all_tm["transfer_fee"], errors="coerce").fillna(0) > 0
+    ][["player_id", "to_club_id", "transfer_date"]].copy().rename(
+        columns={"transfer_date": "perm_date", "to_club_id": "perm_to_club"}
+    )
+    transfers["_lidx"] = range(len(transfers))
+    loan_rows = transfers.loc[
+        transfers["is_loan"], ["_lidx", "player_id", "to_club_id", "transfer_date"]
+    ]
+    if len(loan_rows) > 0:
+        conv_check = loan_rows.merge(perm_moves, on="player_id", how="left")
+        conv_check["days"] = (conv_check["perm_date"] - conv_check["transfer_date"]).dt.days
+        conv_mask = (
+            (conv_check["perm_to_club"] == conv_check["to_club_id"]) &
+            (conv_check["days"] > 60) &    # at least 2 months into the loan
+            (conv_check["days"] <= 730)    # within 24 months
+        )
+        converted_lidxs = set(conv_check.loc[conv_mask, "_lidx"].unique())
+    else:
+        converted_lidxs = set()
+    transfers["loan_converted"] = transfers["_lidx"].isin(converted_lidxs).astype(float)
+    transfers = transfers.drop(columns=["_lidx"])
+    n_conv = int(transfers["loan_converted"].sum())
+    print(f"  {n_conv:,} loans converted to permanent ({n_conv / max(n_loans, 1) * 100:.0f}% of loans)")
+
+    # Recalculate success_score for loans using loan_converted instead of survival_2y.
+    # Same weights — only the survival signal is swapped out.
+    loan_mask_bool = transfers["is_loan"].values
+    if loan_mask_bool.any():
+        min_l  = transfers.loc[loan_mask_bool, "minutes_share_y1"].values
+        gc_l   = transfers.loc[loan_mask_bool, "goal_contribution_y1"].fillna(0.0).values
+        conv_l = transfers.loc[loan_mask_bool, "loan_converted"].values
+        fs_l   = transfers.loc[loan_mask_bool, "_fit_surprise"].values
+        transfers.loc[loan_mask_bool, "success_score"] = np.round(
+            0.35 * min_l + 0.30 * gc_l + 0.20 * conv_l + 0.15 * fs_l, 3
+        )
+    transfers = transfers.drop(columns=["_fit_surprise"], errors="ignore")
 
     out_cols = [
         "player_id", "to_club_id", "transfer_age", "transfer_fee",
